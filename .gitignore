@@ -1,0 +1,15 @@
+# 依赖环境：每台机器自己重建，不进仓库
+.venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 密钥：永远不进仓库
+.env
+
+# 我的个人事务数据（内容天天变，进仓库只会让 git status 变脏）
+tasks.json
+
+# 日志
+*.log
