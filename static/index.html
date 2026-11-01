@@ -62,7 +62,6 @@
     font-size:13px; flex:0 0 104px;
   }
   /* ● = 这个时间是你自己定的，不是程序排的 */
-  .time.fixed{color:var(--ink)}
   .fixed-mark{color:var(--accent);font-weight:700;margin-right:3px}
   .name{flex:1;min-width:0;overflow-wrap:anywhere}
   .meta{font-size:12px;color:var(--muted);flex:0 0 auto}
@@ -105,9 +104,44 @@
   .draft-actions button{flex:0 0 auto;padding:8px 14px}
 
   @media(max-width:560px){
+    body{padding:20px 14px 48px}
+
+    /* 坑一：iOS Safari 在聚焦 font-size 小于 16px 的输入框时，
+       会把整个页面自动放大，而且放大后不会自己缩回去。
+       把控件字号钉死在 16px 就不会触发。**跟布局无关，纯粹是字号。** */
+    input,select,button{font-size:16px}
+
     #add-form{grid-template-columns:1fr 1fr}
     #add-form input[name="name"]{grid-column:1/-1}
-    .why{padding-left:0}
+
+    /* 坑二：一行放不下"时间 + 名字 + 优先级 + 时长 + 按钮"五样东西。
+       硬挤的结果是名字被压成一列一个字，等于看不见。
+       改成两行：
+           ● 09:00–10:30  写周报
+           60分  高              [完成]
+       grid-template-areas 是给每样东西指定"摆在哪一格"。
+       比用 flex 硬挤好控制——想让谁换行就让谁换行。 */
+    li{
+      display:grid; align-items:baseline;
+      grid-template-columns:auto 1fr auto;
+      grid-template-areas:
+        "time name name"
+        "meta tag  btn"
+        "why  why  why";
+      column-gap:8px; row-gap:5px;
+    }
+    .time{grid-area:time; font-size:12px}
+    .name{grid-area:name}
+    .meta{grid-area:meta; font-size:11px}
+    .tag{grid-area:tag; justify-self:start}
+    .done-btn{grid-area:btn; justify-self:end; padding:8px 14px; font-size:13px}
+    .why{grid-area:why; padding-left:0}
+
+    /* 坑三：手指比鼠标粗得多。按钮太小会点不准，
+       而且点到旁边就是"没反应"，用户只会觉得程序坏了。 */
+    .summary{flex-wrap:wrap; gap:6px 16px}
+    .draft-actions{flex-wrap:wrap}
+    .draft-actions button{padding:11px 16px}
   }
 </style>
 </head>

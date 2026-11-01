@@ -36,9 +36,10 @@ Python 3.13 + Flask + requests。依赖清单在 `requirements.txt`。
 | `plan.py` | 核心逻辑 + 命令行 | 只有 `load_tasks`/`save_tasks` 碰 |
 | `config.py` | 读 `.env` | 只读 `.env` |
 | `ai.py` | 把一句话翻译成任务草稿 | 不碰 |
-| `app.py` | HTTP 层，Flask 路由 | 通过 plan.py 间接碰 |
+| `app.py` | HTTP 层，Flask 路由 + 口令门 | 通过 plan.py 间接碰 |
 | `static/index.html` | 界面，单文件 | 不碰 |
-| `test_plan.py` / `test_ai.py` | 测试 | 不碰 |
+| `test_plan.py` / `test_ai.py` | 测试（用 `py` 跑） | 不碰 |
+| `test_app.py` | 口令门 + 启动决定的测试 | 不碰 |
 
 ## 三条不能破的架构规矩
 
@@ -81,12 +82,17 @@ AI 把「明天上午写周报，一小时，很急」翻译成
     py plan.py
     py plan.py add "写周报" 60 高           # 不定时间，自动找空档
     py plan.py add "开会" 30 高 14:00       # 定死 14:00
-    py test_plan.py
-    py test_ai.py
+    py test_plan.py                         # 用 py
+    py test_ai.py                           # 用 py
+    .venv/Scripts/python.exe test_app.py    # 必须用 venv 的 Python（要 Flask）
 
-    # 网页
+    # 网页：只有本机能连
     .venv/Scripts/python.exe app.py
     # 浏览器打开 http://127.0.0.1:8000
+
+    # 网页：开放到局域网，手机也能连（要求 .env 里有 APP_PASSWORD）
+    .venv/Scripts/python.exe app.py --lan
+    # 手机打开 http://<这台电脑的局域网地址>:8000
 
 **这台机器上 `python` 是坏的**（微软商店占位垫片，静默失败、退出码 0），
 必须用 `py`。装包要挂清华源，直连 PyPI 基本不可用。
@@ -98,9 +104,13 @@ AI 相关配置在 `.env`（**不进 git**）。照 `.env.example` 抄一份：
     AI_BASE_URL=https://api.anthropic.com
     AI_API_KEY=...
     AI_MODEL=deepseek-v4.1-flash
+    APP_PASSWORD=...        # 网页口令；留空 = 不启用
 
 没配 `.env` 时，`/api/parse` 会返回一句中文提示，而不是抛异常栈。
 **这个降级行为要一直保留**——没有 AI，命令行和手动添加必须照常可用。
+
+`APP_PASSWORD` 留空 = 口令门不启用，本机开发时不用输。
+但 **`--lan` 会强制要求它非空**，见下面「安全」。
 
 ## 代码约定
 
@@ -111,22 +121,24 @@ AI 相关配置在 `.env`（**不进 git**）。照 `.env.example` 抄一份：
 - **用户输入显示到页面前必须转义**（`esc()`），防 XSS
 - 网络调用的失败信息要是人话，不要把异常栈丢到界面上
 
-## 当前边界（v0.4）
+## 当前边界（v0.5）
 
 以下属于后续版本，**不要主动实现**：
 
 - 持久化到数据库（现在 JSON 文件够用）
 - 提醒 / 通知
 - 多天规划、历史统计（**注意：现在没有"日期"概念，只有"一天"**）
-- 用户系统、多设备同步
+- 用户系统、多设备同步（口令门是**单用户共享口令**，不是账号体系）
 - 流式输出、多轮对话
 - 拖拽调整时间、日历视图
+- HTTPS / 证书（要 HTTPS 就意味着要域名或自签证书，是另一个话题）
+- 删除事务（用户提过，还没做）
 
 ## 加功能的方式
 
 一次只加一个功能。加完：
 
-1. 跑 `py test_plan.py` 和 `py test_ai.py`，确认全绿
+1. 跑 `py test_plan.py`、`py test_ai.py`、`.venv/Scripts/python.exe test_app.py`，确认全绿
 2. 手动跑一遍命令行**和**网页，两边都看
 3. 再 commit
 
@@ -134,6 +146,19 @@ AI 相关配置在 `.env`（**不进 git**）。照 `.env.example` 抄一份：
 
 ## 安全
 
-- `debug=True` 只用于本地开发，**上线前必须关掉**（会暴露源码和调试台）
-- 服务器只绑 `127.0.0.1`。改成 `0.0.0.0` 等于把服务暴露给整个局域网
-- 密钥只在 `.env` 里，**绝不写进代码、绝不提交**
+- 密钥和口令只在 `.env` 里，**绝不写进代码、绝不提交**
+- **口令门是 `@app.before_request`，不是逐路由挂的。**
+  加新路由时**不要**自己去写检查，也别把它挪到某个蓝图里——
+  挂在 before_request 上意味着**没有路由能漏掉**。这是故意的。
+- 加新路由时确认它会被这道门保护（默认就会）。
+- **`--lan` 时 `debug` 必须为 False。** Werkzeug 的调试台是个能在服务器上
+  执行任意代码的 Python 交互环境，本机自己用没问题，开放到局域网就是
+  给别人递刀。`use_reloader` 是另一回事，可以留着。
+- **失败要往安全那边倒**：`--lan` 而没设口令时**拒绝启动**，不是"启动了但
+  悄悄没保护"。后者你不会知道，前者你立刻知道。这条不能改成 warning。
+- 口令比较用 `hmac.compare_digest`，**两边都要先 `.encode("utf-8")`**：
+  它传字符串时只吃纯 ASCII，中文口令会抛 `TypeError`（500，不是 401）。
+- 说明白已知的边界：**HTTP 上的 Basic 认证，口令在网线上等于明文**
+  （base64 只是编码，不是加密）。它挡的是"同网络的人扫到端口就能进"，
+  挡不住"同一网段上有人在抓包"。真要挡后者只能上 HTTPS。
+  这个限制要如实告诉用户，不要让人以为有了口令就万无一失。

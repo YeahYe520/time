@@ -8,9 +8,13 @@
 **排程逻辑一行都不在这里**——它全在 plan.py，同一份逻辑命令行和网页共用。
 """
 
-from flask import Flask, jsonify, request, send_from_directory
+import hmac
+import sys
+
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from ai import parse_request
+from config import APP_PASSWORD
 from plan import (
     DAY_END,
     DAY_START,
@@ -24,6 +28,45 @@ from plan import (
 )
 
 app = Flask(__name__, static_folder="static")
+
+
+@app.before_request
+def require_password():
+    """整个站点的口令门。跑在每个请求之前，所以**没有路由能绕过去**。
+
+    用的是 HTTP Basic：浏览器自己弹一个输入框，输一次就记住，
+    之后连 fetch() 发的请求也会自动带上认证头。
+    **我们刻意不写登录页、不写会话管理**——那两样是 web 里最容易写出
+    漏洞的地方（cookie 没签名、会话固定攻击、忘记加 HttpOnly……）。
+    交给浏览器做，比自己做靠谱得多。
+
+    APP_PASSWORD 为空 = 不启用这道门。
+    """
+    if not APP_PASSWORD:
+        return None
+
+    # 先判空再取属性。反过来写的话，没带认证头的请求会在 auth.password
+    # 那一行炸成 500——本该是"请出示口令"，结果变成"服务器坏了"。
+    auth = request.authorization
+    supplied = (auth.password if auth else "") or ""
+
+    # 用 compare_digest 而不是 ==：== 一旦发现不同的字符就立刻返回，
+    # 攻击者能靠"这次响应是不是快了零点几微秒"一个字符一个字符试出口令。
+    # compare_digest 无论对不对都花一样长的时间，这条路就堵死了。
+    #
+    # **两边都要先 encode 成 bytes。** compare_digest 传字符串时只接受纯 ASCII，
+    # 中文会直接抛 TypeError——也就是把口令设成中文就登不进来了（500，不是 401）。
+    # 转成 bytes 之后它就不挑内容了。
+    if hmac.compare_digest(supplied.encode("utf-8"), APP_PASSWORD.encode("utf-8")):
+        return None
+
+    # 这个响应头不能省：没有它浏览器不会弹口令框，
+    # 只会干巴巴显示"需要口令"，用户根本不知道该干什么。
+    return Response(
+        "需要口令。用户名随便填，密码是 .env 里的 APP_PASSWORD。",
+        401,
+        {"WWW-Authenticate": 'Basic realm="time", charset="UTF-8"'},
+    )
 
 
 @app.get("/")
@@ -146,7 +189,44 @@ def api_done(task_id):
     return jsonify(task)
 
 
+def startup_plan(argv, password):
+    """决定怎么启动服务。返回 (绑哪个地址, 开不开调试台, 错误信息)。
+
+    **纯函数**——不启动任何东西、不打印、不退出进程，所以测得动。
+    （这正是这个项目一路在做的事：把"判断"从"动作"里剥出来。
+    留在 `__main__` 里的话，想测就只能真的把服务器起起来。）
+
+    两条规矩：
+
+    1. 默认只绑 127.0.0.1（回环地址）= 只有这台电脑能连。
+       加 --lan 才绑 0.0.0.0（所有网卡），手机才能从局域网连进来。
+    2. **要开放，就必须先有口令。** 宁可拒绝启动，也不让一个没口令的
+       服务裸奔在局域网上——"启动了但悄悄没保护"你是不会知道的，
+       "拒绝启动"你立刻就知道。
+    """
+    lan = "--lan" in argv
+
+    if lan and not password:
+        return None, None, (
+            "拒绝启动：--lan 会把服务开放给整个局域网，但 .env 里没有 APP_PASSWORD。\n"
+            "先在 .env 里加一行 APP_PASSWORD=你的口令，再重试。"
+        )
+
+    # debug=True 会同时打开两样东西：自动重载，和**浏览器里的调试台**。
+    # 那个调试台是个能在服务器上执行任意代码的 Python 交互环境——
+    # 本机自己用没问题，开放到局域网就是给别人递刀。所以 --lan 时关掉它。
+    return ("0.0.0.0" if lan else "127.0.0.1"), (not lan), None
+
+
 if __name__ == "__main__":
-    # debug=True：改完代码自动重启，出错时浏览器能看到详细堆栈。
-    # 但它会把源码和调试台暴露给任何能访问的人，**上线前必须关掉**。
-    app.run(host="127.0.0.1", port=8000, debug=True)
+    host, debug, error = startup_plan(sys.argv[1:], APP_PASSWORD)
+    if error:
+        sys.exit(error)
+
+    if host != "127.0.0.1":
+        print("!! 已开放到局域网：同一网络下的人只要知道口令就能访问。")
+        print("!! 手机打开 http://<这台电脑的局域网地址>:8000")
+
+    # use_reloader 留着：改完代码自动重启。它和调试台是两回事，
+    # 关掉 debug 不影响它。
+    app.run(host=host, port=8000, debug=debug, use_reloader=True)

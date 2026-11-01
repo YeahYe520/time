@@ -41,6 +41,11 @@ AI_BASE_URL = os.environ.get("AI_BASE_URL", "")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
 AI_MODEL = os.environ.get("AI_MODEL", "deepseek-v4.1-flash")
 
+# 网页口令。**留空 = 不启用**——本机开发时不想每开一次页面就输一次。
+# 但一旦要把服务开放到局域网（py app.py --lan），app.py 会强制要求它非空，
+# 宁可拒绝启动，也不让一个没口令的服务在局域网上裸奔。
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
 
 def ai_configured():
     """密钥配好了没。没配时网页会给出提示，而不是抛一堆栈。"""
