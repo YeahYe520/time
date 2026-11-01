@@ -5,26 +5,38 @@
 """
 
 import unittest
+from datetime import date
 
 from plan import (
     blocked_reason,
+    describe,
     find_gap,
+    friendly_day,
     make_task,
     mark_done,
     overlaps,
+    parse_date,
     parse_hhmm,
+    render,
     schedule,
+    shift_day,
     sort_for_claiming,
     sort_tasks,
+    take_date_flag,
+    task_day,
+    tasks_on,
     to_hhmm,
+    today_iso,
     validate_task,
+    weekday_cn,
 )
 
 
-def task(name, minutes, priority="中", done=False, id=1, start=None):
+def task(name, minutes, priority="中", done=False, id=1, start=None, date=None):
     """造一条测试用的事务。
 
     start 是"从零点起的分钟数"，None 表示没定时间（会被自动安排）。
+    date 是 'YYYY-MM-DD'，None 表示不写这个键（模拟 v0.5 之前的老数据）。
     """
     t = {
         "id": id,
@@ -35,7 +47,16 @@ def task(name, minutes, priority="中", done=False, id=1, start=None):
     }
     if start is not None:
         t["start"] = start
+    if date is not None:
+        t["date"] = date
     return t
+
+
+# 测试里所有"今天"都用这个常量，绝不调 today_iso()。
+# 否则测试结果会随真实日期变，哪天跑失败都说不清是代码坏了还是日子不对。
+TODAY = "2026-11-01"        # 周日
+TOMORROW = "2026-11-02"     # 周一
+YESTERDAY = "2026-10-31"    # 周六
 
 
 class TestToHhmm(unittest.TestCase):
@@ -441,6 +462,256 @@ class TestValidateTaskWithStart(unittest.TestCase):
         fields, error = validate_task("写周报", "60", "高", "25:00")
         self.assertIsNone(fields)
         self.assertIn("超出范围", error)
+
+
+class TestParseDate(unittest.TestCase):
+    def test_standard_form(self):
+        self.assertEqual(parse_date("2026-11-03"), ("2026-11-03", None))
+
+    def test_accepts_slashes(self):
+        # 手写日期很多人是 2026/11/3 这个习惯
+        self.assertEqual(parse_date("2026/11/03"), ("2026-11-03", None))
+
+    def test_pads_single_digits(self):
+        # '2026-1-3' 补零成 '2026-01-03'——不补的话字符串排序就乱了
+        self.assertEqual(parse_date("2026-1-3"), ("2026-01-03", None))
+
+    def test_accepts_compact_form(self):
+        # ISO 8601 的紧凑写法，Python 3.11 起 fromisoformat 直接认
+        self.assertEqual(parse_date("20261103"), ("2026-11-03", None))
+
+    def test_accepts_int(self):
+        self.assertEqual(parse_date(20261103), ("2026-11-03", None))
+
+    def test_output_is_always_padded(self):
+        # 宽进严出：进去的花样再多，出来的只有一种形状
+        for written in ("2026-11-03", "2026/11/03", "2026-11-3", "20261103", 20261103):
+            with self.subTest(written=written):
+                self.assertEqual(parse_date(written)[0], "2026-11-03")
+
+    def test_strips_whitespace(self):
+        self.assertEqual(parse_date("  2026-11-03  "), ("2026-11-03", None))
+
+    def test_blank_means_no_date(self):
+        for blank in ("", "   ", None):
+            with self.subTest(text=blank):
+                self.assertEqual(parse_date(blank), (None, None))
+
+    def test_accepts_date_object(self):
+        self.assertEqual(parse_date(date(2026, 11, 3)), ("2026-11-03", None))
+
+    def test_rejects_bool(self):
+        # bool 是 int 的子类，不拦的话 True 会走到 str() 那条路上去
+        day, error = parse_date(True)
+        self.assertIsNone(day)
+        self.assertIsNotNone(error)
+
+    def test_rejects_garbage(self):
+        # 注意 2026-11-31：格式对、日期不存在，fromisoformat 自己会拦
+        for bad in ("明天", "2026-13-01", "2026-11-31", "11/03", 202611):
+            with self.subTest(text=bad):
+                day, error = parse_date(bad)
+                self.assertIsNone(day)
+                self.assertIn("日期", error)
+
+    def test_does_not_read_clock(self):
+        # 纯函数：同一输入永远同一输出
+        self.assertEqual(parse_date("2026-11-03"), parse_date("2026-11-03"))
+
+
+class TestTodayIso(unittest.TestCase):
+    def test_looks_like_iso_date(self):
+        # 只检查形状，不检查具体是哪天——检查具体哪天，明天就跑失败了
+        self.assertEqual(parse_date(today_iso())[1], None)
+
+
+class TestTaskDay(unittest.TestCase):
+    def test_uses_explicit_date(self):
+        self.assertEqual(task_day(task("A", 10, date=TOMORROW), TODAY), TOMORROW)
+
+    def test_legacy_task_without_date_counts_as_today(self):
+        # v0.5 之前的数据没有 date 键，那时候所有事务都只存在于"今天"
+        self.assertEqual(task_day(task("A", 10), TODAY), TODAY)
+
+
+class TestTasksOn(unittest.TestCase):
+    def setUp(self):
+        self.tasks = [
+            task("今天的事", 10, id=1, date=TODAY),
+            task("明天的事", 10, id=2, date=TOMORROW),
+            task("老数据", 10, id=3),                  # 没有 date 键
+            task("也是明天", 10, id=4, date=TOMORROW),
+        ]
+
+    def test_filters_by_day(self):
+        names = [t["name"] for t in tasks_on(self.tasks, TOMORROW, TODAY)]
+        self.assertEqual(names, ["明天的事", "也是明天"])
+
+    def test_legacy_tasks_show_up_today(self):
+        names = [t["name"] for t in tasks_on(self.tasks, TODAY, TODAY)]
+        self.assertEqual(names, ["今天的事", "老数据"])
+
+    def test_other_day_is_empty(self):
+        self.assertEqual(tasks_on(self.tasks, "2026-12-01", TODAY), [])
+
+    def test_does_not_mutate_input(self):
+        before = [dict(t) for t in self.tasks]
+        tasks_on(self.tasks, TOMORROW, TODAY)
+        self.assertEqual(self.tasks, before)
+
+
+class TestShiftDay(unittest.TestCase):
+    def test_forward(self):
+        self.assertEqual(shift_day(TODAY, 1), TOMORROW)
+
+    def test_backward(self):
+        self.assertEqual(shift_day(TODAY, -1), YESTERDAY)
+
+    def test_zero_is_identity(self):
+        self.assertEqual(shift_day(TODAY, 0), TODAY)
+
+    def test_crosses_month(self):
+        self.assertEqual(shift_day("2026-11-30", 1), "2026-12-01")
+
+    def test_crosses_year(self):
+        self.assertEqual(shift_day("2026-12-31", 1), "2027-01-01")
+
+
+class TestWeekdayCn(unittest.TestCase):
+    def test_sunday(self):
+        self.assertEqual(weekday_cn(TODAY), "周日")
+
+    def test_monday(self):
+        self.assertEqual(weekday_cn(TOMORROW), "周一")
+
+    def test_saturday(self):
+        self.assertEqual(weekday_cn(YESTERDAY), "周六")
+
+
+class TestFriendlyDay(unittest.TestCase):
+    def test_today(self):
+        self.assertEqual(friendly_day(TODAY, TODAY), "今天")
+
+    def test_tomorrow(self):
+        self.assertEqual(friendly_day(TOMORROW, TODAY), "明天")
+
+    def test_yesterday(self):
+        self.assertEqual(friendly_day(YESTERDAY, TODAY), "昨天")
+
+    def test_far_day_spells_it_out(self):
+        self.assertEqual(friendly_day("2026-11-03", TODAY), "11月3日 周二")
+
+    def test_far_day_does_not_pad_month(self):
+        # 「11月3日」比「11月03日」像人话
+        self.assertNotIn("03", friendly_day("2026-11-03", TODAY))
+
+
+class TestMakeTaskWithDate(unittest.TestCase):
+    def test_no_date_fills_in_today(self):
+        t, error = make_task([], "写周报", "60", "高", today=TODAY)
+        self.assertIsNone(error)
+        self.assertEqual(t["date"], TODAY)
+
+    def test_explicit_date_wins(self):
+        t, _ = make_task([], "评审", "60", "中", date_text=TOMORROW, today=TODAY)
+        self.assertEqual(t["date"], TOMORROW)
+
+    def test_date_is_frozen_at_creation(self):
+        """**这条是整个日期功能的核心。**
+
+        今天加的「写周报」写死成今天。明天再用 tomorrow 当"今天"
+        去读它，它还在原来的日子——不会跟着用户往前滚。
+        如果当初写成"读取时现算今天"，这条就会失败。
+        """
+        t, _ = make_task([], "写周报", "60", "高", today=TODAY)
+        self.assertEqual(t["date"], TODAY)
+        self.assertEqual(task_day(t, TOMORROW), TODAY)   # 第二天再看，还在 11-01
+
+    def test_rejects_bad_date(self):
+        t, error = make_task([], "评审", "60", "中", date_text="明天", today=TODAY)
+        self.assertIsNone(t)
+        self.assertIn("日期", error)
+
+    def test_date_and_start_together(self):
+        t, error = make_task([], "评审", "90", "中", "14:00", TOMORROW, TODAY)
+        self.assertIsNone(error)
+        self.assertEqual((t["date"], t["start"]), (TOMORROW, 840))
+
+
+class TestTakeDateFlag(unittest.TestCase):
+    def test_extracts_flag(self):
+        rest, day, error = take_date_flag(["开会", "30", "高", "--date", TOMORROW])
+        self.assertEqual((rest, day, error), (["开会", "30", "高"], TOMORROW, None))
+
+    def test_flag_can_come_first(self):
+        rest, day, _ = take_date_flag(["--date", TOMORROW, "开会", "30", "高"])
+        self.assertEqual((rest, day), (["开会", "30", "高"], TOMORROW))
+
+    def test_no_flag_passes_through(self):
+        rest, day, error = take_date_flag(["开会", "30", "高"])
+        self.assertEqual((rest, day, error), (["开会", "30", "高"], None, None))
+
+    def test_flag_without_value_is_an_error(self):
+        rest, day, error = take_date_flag(["开会", "30", "高", "--date"])
+        self.assertIsNone(rest)
+        self.assertIn("--date", error)
+
+    def test_does_not_mutate_input(self):
+        args = ["开会", "30", "高", "--date", TOMORROW]
+        take_date_flag(args)
+        self.assertEqual(len(args), 5)
+
+
+class TestDescribeWithDate(unittest.TestCase):
+    def test_today_has_no_date_tag(self):
+        # 今天的事务是绝大多数，每条都缀个日期纯属噪音
+        line = describe(task("写周报", 60, date=TODAY), TODAY)
+        self.assertNotIn("11月", line)
+        self.assertIn("写周报", line)
+
+    def test_other_day_shows_date(self):
+        line = describe(task("评审", 90, date=TOMORROW), TODAY)
+        self.assertIn("明天", line)
+
+    def test_legacy_task_has_no_date_tag(self):
+        self.assertNotIn("11月", describe(task("老数据", 60), TODAY))
+
+
+class TestRenderWithDay(unittest.TestCase):
+    def test_title_uses_friendly_day(self):
+        text = render([], [], day=TOMORROW, today=TODAY)
+        self.assertIn("明天", text)
+
+    def test_empty_day_says_so(self):
+        self.assertIn("没有安排", render([], [], day=TODAY, today=TODAY))
+
+    def test_legacy_call_still_works(self):
+        # 老的调用方式（只传两个列表）不能坏
+        scheduled, blocked = schedule([task("写周报", 60)])
+        self.assertIn("写周报", render(scheduled, blocked))
+
+
+class TestScheduleIsPerDay(unittest.TestCase):
+    def test_two_days_do_not_collide(self):
+        """不同天的事务**各排各的**——都从 09:00 开始，谁也不挤谁。"""
+        tasks = [
+            task("今天的会", 60, "高", id=1, start=540, date=TODAY),
+            task("明天的会", 60, "高", id=2, start=540, date=TOMORROW),
+        ]
+        for day in (TODAY, TOMORROW):
+            with self.subTest(day=day):
+                scheduled, blocked = schedule(tasks_on(tasks, day, TODAY))
+                self.assertEqual(len(scheduled), 1)
+                self.assertEqual(blocked, [])
+
+    def test_same_day_still_collides(self):
+        tasks = [
+            task("先建的", 60, "高", id=1, start=540, date=TODAY),
+            task("后建的", 60, "高", id=2, start=540, date=TODAY),
+        ]
+        scheduled, blocked = schedule(tasks_on(tasks, TODAY, TODAY))
+        self.assertEqual([t["name"] for t in scheduled], ["先建的"])
+        self.assertEqual([t["name"] for t in blocked], ["后建的"])
 
 
 if __name__ == "__main__":

@@ -51,6 +51,21 @@
   button.ghost{background:none;color:var(--muted);border-color:var(--line)}
   button.ghost:hover{filter:none;border-color:var(--muted);color:var(--ink)}
 
+  /* 日期导航条：‹ 今天 2026-11-01 ›
+     三栏网格 auto/1fr/auto，中间那栏吃掉剩余宽度。
+     这样左右两个箭头永远贴在两端，标签在正中——
+     标签文字长短变化（"今天" vs "11月3日 周二"）都不会把箭头挤歪。 */
+  .daynav{
+    display:grid; grid-template-columns:auto 1fr auto; align-items:center;
+    gap:10px; margin-bottom:14px; padding-bottom:12px;
+    border-bottom:1px solid var(--line);
+  }
+  .daymid{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}
+  #day-label{font-weight:600}
+  .daydate{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
+  .nav-btn{padding:3px 13px;font-size:17px;line-height:1.25}
+  .mini{padding:2px 9px;font-size:12px;border-radius:5px}
+
   ul{list-style:none;margin:0;padding:0}
   li{
     display:flex; align-items:baseline; gap:11px;
@@ -165,7 +180,7 @@
   </div>
 
   <div class="card">
-    <h2>手动添加</h2>
+    <h2>手动添加 <span class="daydate" id="add-day"></span></h2>
     <form id="add-form">
       <input name="name" placeholder="要做什么" autocomplete="off" required>
       <!-- type="time" 空着时值是空字符串，正好等于"没定时间，自动找空档" -->
@@ -183,7 +198,16 @@
   </div>
 
   <div class="card">
-    <h2>今日行程</h2>
+    <h2 id="day-title">行程</h2>
+    <div class="daynav">
+      <button type="button" class="ghost nav-btn" id="prev-day" title="前一天">‹</button>
+      <div class="daymid">
+        <span id="day-label">…</span>
+        <span class="daydate" id="day-date"></span>
+        <button type="button" class="ghost mini" id="back-today" hidden>回到今天</button>
+      </div>
+      <button type="button" class="ghost nav-btn" id="next-day" title="后一天">›</button>
+    </div>
     <ul id="schedule"></ul>
     <div class="summary" id="summary"></div>
   </div>
@@ -222,12 +246,37 @@ function row(t, timeHtml, extra, why) {
   </li>`;
 }
 
-/* ---------- 今日行程 ---------- */
+/* ---------- 行程 ---------- */
 
-async function refresh() {
-  const data = await (await fetch("/api/plan")).json();
+// 现在看的是哪一天。**日期一律由服务端给，前端从不自己算。**
+// 为什么？因为跨月、跨年、闰年、时区，这些地方自己算迟早会错；
+// 而 Python 那边已经有一套测过的 shift_day 了，直接用它的结果最省心。
+// null 表示"还没问过服务端"，第一次请求就不带参数，让服务端给今天。
+let viewDay = null;
 
-  $("sub").textContent = `今日行程 · 自动排程区间 ${data.day_start}–${data.day_end}`;
+async function refresh(day) {
+  if (day !== undefined) viewDay = day;
+
+  const url = viewDay ? `/api/plan?date=${encodeURIComponent(viewDay)}` : "/api/plan";
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!res.ok) {
+    $("ai-error").textContent = data.error || "读不到行程";
+    return;
+  }
+
+  // 以服务端返回的为准，覆盖本地那份——两边不一致时听服务端的
+  viewDay = data.day;
+  const isToday = data.day === data.today;
+
+  $("sub").textContent = `自动排程区间 ${data.day_start}–${data.day_end}`;
+  $("day-title").textContent = `${data.label}的行程`;
+  $("day-label").textContent = data.label;
+  $("day-date").textContent = isToday ? "" : data.day;
+  $("back-today").hidden = isToday;
+  // 手动添加加的是"你正在看的这一天"。写在标题上，免得翻到后天加东西时
+  // 心里没底——加错了要翻回去才发现。
+  $("add-day").textContent = isToday ? "" : `→ ${data.day}`;
 
   $("schedule").innerHTML = data.scheduled.length
     ? data.scheduled.map(t => row(
@@ -257,7 +306,16 @@ async function refresh() {
         t.reason
       )).join("");
   }
+
+  // 箭头指向哪儿也听服务端的（data.prev / data.next）。
+  // 存下来而不是现算，是为了跟上面显示的那一天严格对得上。
+  $("prev-day").dataset.day = data.prev;
+  $("next-day").dataset.day = data.next;
 }
+
+$("prev-day").addEventListener("click", (e) => refresh(e.target.dataset.day));
+$("next-day").addEventListener("click", (e) => refresh(e.target.dataset.day));
+$("back-today").addEventListener("click", () => refresh(null));
 
 /* ---------- AI 解析 ---------- */
 
@@ -306,6 +364,7 @@ async function confirmDrafts(btn) {
         minutes: t.minutes,
         priority: t.priority,
         start: t.start || "",     // 空 = 没定时间，交给程序找空档
+        date: viewDay,            // 加到你正在看的那一天
       }),
     });
     if (!res.ok) {
@@ -394,6 +453,9 @@ $("add-form").addEventListener("submit", async (e) => {
       start: form.elements.namedItem("start").value,   // type=time 空着就是 ""
       minutes: form.elements.namedItem("minutes").value,
       priority: form.elements.namedItem("priority").value,
+      // **明确告诉服务端加到哪天**，不让它自己"猜今天"——
+      // 你可能正翻到后天在往里加事，那时候"今天"不是你想要的答案。
+      date: viewDay,
     }),
   });
   const data = await res.json();

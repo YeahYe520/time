@@ -12,6 +12,7 @@ import base64
 import unittest
 
 import app as app_module
+from plan import shift_day, today_iso
 
 
 def basic(password, username="time"):
@@ -161,6 +162,91 @@ class TestStartupPlan(unittest.TestCase):
     def test_extra_arguments_do_not_confuse_it(self):
         host, _, _ = app_module.startup_plan(["--verbose", "--lan"], "口令")
         self.assertEqual(host, "0.0.0.0")
+
+
+class TestPlanApiByDate(PasswordGateTestCase):
+    """按日期取行程、按日期加事务。
+
+    **绝不碰真的 tasks.json**：把 app 模块里的 load_tasks/save_tasks
+    换成假的，数据只在内存里转一圈。测试跑完你的日程一条不少。
+    （app.py 里是 `from plan import load_tasks`，名字绑在 app 模块上，
+    所以换 app_module.load_tasks 就能拦住——换 plan.load_tasks 没用。）
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.use_password("")            # 这组测日期，不测口令
+        self.real_load = app_module.load_tasks
+        self.real_save = app_module.save_tasks
+        self.store = []
+        app_module.load_tasks = lambda: self.store
+        app_module.save_tasks = lambda tasks: None
+
+    def tearDown(self):
+        app_module.load_tasks = self.real_load
+        app_module.save_tasks = self.real_save
+        super().tearDown()
+
+    def add(self, name, date=None, **extra):
+        body = {"name": name, "minutes": "30", "priority": "中", **extra}
+        if date is not None:
+            body["date"] = date
+        return self.client.post("/api/tasks", json=body)
+
+    def test_plan_defaults_to_today(self):
+        data = self.client.get("/api/plan").get_json()
+        self.assertEqual(data["day"], data["today"])
+        self.assertEqual(data["label"], "今天")
+
+    def test_plan_takes_a_date(self):
+        data = self.client.get("/api/plan?date=2026-11-03").get_json()
+        self.assertEqual(data["day"], "2026-11-03")
+
+    def test_prev_and_next_are_adjacent_days(self):
+        data = self.client.get("/api/plan?date=2026-11-03").get_json()
+        self.assertEqual(data["prev"], "2026-11-02")
+        self.assertEqual(data["next"], "2026-11-04")
+
+    def test_prev_and_next_cross_the_month(self):
+        # 跨月自己算很容易错，所以前端不自己算，全用服务端给的
+        data = self.client.get("/api/plan?date=2026-11-30").get_json()
+        self.assertEqual(data["next"], "2026-12-01")
+
+    def test_rejects_bad_date(self):
+        res = self.client.get("/api/plan?date=明天")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("日期", res.get_json()["error"])
+
+    def test_slash_date_is_accepted(self):
+        # 宽进：手写习惯的斜杠也认
+        data = self.client.get("/api/plan?date=2026/11/03").get_json()
+        self.assertEqual(data["day"], "2026-11-03")
+
+    def test_added_task_lands_on_the_requested_day(self):
+        self.assertEqual(self.add("评审", date="2026-11-03").status_code, 201)
+        self.assertEqual(self.store[0]["date"], "2026-11-03")
+
+    def test_added_task_defaults_to_today(self):
+        self.add("写周报")
+        self.assertEqual(self.store[0]["date"], today_iso())
+
+    def test_plan_shows_only_that_day(self):
+        self.add("今天的事")
+        self.add("明天的事", date=shift_day(today_iso(), 1))
+
+        today_names = [t["name"] for t in
+                       self.client.get("/api/plan").get_json()["scheduled"]]
+        tomorrow_names = [t["name"] for t in
+                          self.client.get(f"/api/plan?date={shift_day(today_iso(), 1)}")
+                          .get_json()["scheduled"]]
+        self.assertEqual(today_names, ["今天的事"])
+        self.assertEqual(tomorrow_names, ["明天的事"])
+
+    def test_bad_date_on_add_is_rejected(self):
+        res = self.add("评审", date="下周三")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("日期", res.get_json()["error"])
+        self.assertEqual(self.store, [])       # 没通过校验就一条都不该留下
 
 
 if __name__ == "__main__":

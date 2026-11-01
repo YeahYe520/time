@@ -19,12 +19,17 @@ from plan import (
     DAY_END,
     DAY_START,
     blocked_reason,
+    friendly_day,
     load_tasks,
     make_task,
     mark_done,
+    parse_date,
     save_tasks,
     schedule,
+    shift_day,
+    tasks_on,
     to_hhmm,
+    today_iso,
 )
 
 app = Flask(__name__, static_folder="static")
@@ -76,8 +81,17 @@ def index():
 
 @app.get("/api/plan")
 def api_plan():
-    """今日行程。前端拿这个渲染时间表。"""
-    scheduled, blocked = schedule(load_tasks())
+    """某一天的行程。前端拿这个渲染时间表。
+
+    看哪天由 `?date=2026-11-03` 决定，不传就是今天。
+    """
+    today = today_iso()
+    day, error = parse_date(request.args.get("date"))
+    if error:
+        return jsonify({"error": error}), 400
+    day = day or today
+
+    scheduled, blocked = schedule(tasks_on(load_tasks(), day, today))
 
     def brief(t):
         return {
@@ -88,6 +102,15 @@ def api_plan():
         }
 
     return jsonify({
+        # 这一天是谁、怎么称呼它、前后一天是哪天——**全在服务端算好再发下去**。
+        # 前端只负责显示，不自己算日期。这样命令行、网页看到的
+        # 「明天」永远是同一个意思；JS 里再实现一遍迟早会跟 Python 这边跑偏
+        # （时区、跨月、跨年，都是容易写错的地方）。
+        "day": day,
+        "label": friendly_day(day, today),
+        "today": today,
+        "prev": shift_day(day, -1),
+        "next": shift_day(day, 1),
         "day_start": to_hhmm(DAY_START),
         "day_end": to_hhmm(DAY_END),
         # 已排的补上可显示的时间文本，别把内部的分钟数漏给前端。
@@ -164,12 +187,18 @@ def api_add_task():
     tasks = load_tasks()
     # 校验规则和命令行完全共用——网页绕不过去。
     # start 留空（""）表示没定时间，plan.py 会把它自动排进空档。
+    #
+    # date 也一起传进来：**加到哪天，由前端明确告诉我们**，不靠服务端"猜今天"。
+    # 因为你可能正翻到后天在往里加事——那时候"今天"不是你想要的答案。
+    # today 显式传进去，是为了让这一次请求里只读一次时钟。
     task, error = make_task(
         tasks,
         data.get("name", ""),
         data.get("minutes", ""),
         data.get("priority", ""),
-        data.get("start", ""),
+        start_text=data.get("start", ""),
+        date_text=data.get("date", ""),
+        today=today_iso(),
     )
     if error:
         return jsonify({"error": error}), 400
