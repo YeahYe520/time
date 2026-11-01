@@ -16,6 +16,7 @@ from plan import (
     mark_done,
     overlaps,
     parse_date,
+    parse_day_offset,
     parse_hhmm,
     render,
     schedule,
@@ -604,6 +605,67 @@ class TestFriendlyDay(unittest.TestCase):
     def test_far_day_does_not_pad_month(self):
         # 「11月3日」比「11月03日」像人话
         self.assertNotIn("03", friendly_day("2026-11-03", TODAY))
+
+
+class TestParseDayOffset(unittest.TestCase):
+    """AI 给的是"距今几天"，换成日期由这里做。"""
+
+    def test_zero_is_today(self):
+        self.assertEqual(parse_day_offset(0, TODAY), (TODAY, None))
+
+    def test_one_is_tomorrow(self):
+        self.assertEqual(parse_day_offset(1, TODAY), (TOMORROW, None))
+
+    def test_negative_is_the_past(self):
+        self.assertEqual(parse_day_offset(-1, TODAY), (YESTERDAY, None))
+
+    def test_crosses_month(self):
+        # 11-30 加一天是 12-01，靠的是 datetime，不是自己写进位
+        self.assertEqual(parse_day_offset(1, "2026-11-30"), ("2026-12-01", None))
+
+    def test_numeric_string_is_accepted(self):
+        # AI 有时给数字有时给字符串
+        self.assertEqual(parse_day_offset("2", TODAY), ("2026-11-03", None))
+
+    def test_blank_means_no_date(self):
+        for blank in (None,):
+            with self.subTest(text=blank):
+                self.assertEqual(parse_day_offset(blank, TODAY), (None, None))
+
+    def test_rejects_bool(self):
+        # bool 是 int 的子类，不拦的话 True 会变成"差 1 天"
+        day, error = parse_day_offset(True, TODAY)
+        self.assertIsNone(day)
+        self.assertIsNotNone(error)
+
+    def test_rejects_fractional_number(self):
+        # int(3.7) 会**悄悄截成 3**——这种静默的错误最要命
+        day, error = parse_day_offset(3.7, TODAY)
+        self.assertIsNone(day)
+        self.assertIn("没看懂", error)
+
+    def test_accepts_whole_float(self):
+        self.assertEqual(parse_day_offset(1.0, TODAY), (TOMORROW, None))
+
+    def test_rejects_non_numeric(self):
+        for bad in ("明天", "下周三", "3天"):
+            with self.subTest(text=bad):
+                day, error = parse_day_offset(bad, TODAY)
+                self.assertIsNone(day)
+                self.assertIn("没看懂", error)
+
+    def test_rejects_absurd_offsets(self):
+        # 一年以后 / 一个月以前都超出任何正常计划，八成是 AI 算错了。
+        # **宁可不要这个日期，也不能存一个荒唐的日子。**
+        for bad in (366, -31, 100000):
+            with self.subTest(offset=bad):
+                day, error = parse_day_offset(bad, TODAY)
+                self.assertIsNone(day)
+                self.assertIn("离谱", error)
+
+    def test_boundaries_are_inclusive(self):
+        self.assertIsNotNone(parse_day_offset(365, TODAY)[0])
+        self.assertIsNotNone(parse_day_offset(-30, TODAY)[0])
 
 
 class TestMakeTaskWithDate(unittest.TestCase):

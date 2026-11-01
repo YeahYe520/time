@@ -153,7 +153,8 @@ def api_parse():
     if not text:
         return jsonify({"error": "说点什么吧"}), 400
 
-    drafts, problems = parse_request(text)
+    today = today_iso()
+    drafts, problems = parse_request(text, today=today)
     # drafts is None = 整个解析失败（连不上 AI / 回复不是 JSON）。
     # drafts 是列表但 problems 非空 = 部分成功，**不能连好的那几条一起丢掉**。
     if drafts is None:
@@ -163,7 +164,13 @@ def api_parse():
     return jsonify({
         "drafts": [
             # 和 /api/plan 一样，把内部的分钟数换成 "09:30" 再给前端
-            {**d, "start": to_hhmm(d["start"]) if d.get("start") is not None else None}
+            {
+                **d,
+                "start": to_hhmm(d["start"]) if d.get("start") is not None else None,
+                # 日期也一样：给的是**给人看的说法**（"明天"），不是裸的 2026-11-02。
+                # 草稿区要让用户一眼确认"这是哪天"，看到日期字符串还得自己换算。
+                "date_label": friendly_day(d["date"], today) if d.get("date") else None,
+            }
             for d in drafts
         ],
         "warning": problems,

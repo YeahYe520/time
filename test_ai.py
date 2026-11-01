@@ -14,7 +14,7 @@
 
 import unittest
 
-from ai import parse_reply
+from ai import build_prompt, parse_reply
 
 
 class TestParseReply(unittest.TestCase):
@@ -185,6 +185,110 @@ class TestParseReplyStartTime(unittest.TestCase):
         self.assertNotIn("start", drafts[0])
 
 
+class TestParseReplyDayOffset(unittest.TestCase):
+    """日期：AI 只报"距今几天"，换成具体日期由 plan.parse_day_offset 做。
+
+    这一组全部显式传 today——**测试里绝不读真实时钟**，
+    否则今天跑绿、明天跑红，你分不清是代码坏了还是日子不对。
+    """
+
+    TODAY = "2026-11-01"
+
+    def parse(self, day_offset_json):
+        # 用 replace 填占位符，不用 f-string——这段 JSON 里全是花括号，
+        # f-string 里每个都得写成 {{ }}，我第一版就栽在这儿：
+        # 少写一个，拼出来的 JSON 坏在中间，报错还指向别的地方。
+        # （ai.py 的 build_prompt 用 replace，也是同一个理由。）
+        raw = ('{"tasks":[{"name":"写周报","minutes":60,"priority":"高",'
+               '"day_offset":__OFFSET__}]}')
+        return parse_reply(raw.replace("__OFFSET__", day_offset_json), self.TODAY)
+
+    def test_offset_is_turned_into_a_date(self):
+        drafts, problems = self.parse("1")
+        self.assertIsNone(problems)
+        self.assertEqual(drafts[0]["date"], "2026-11-02")
+
+    def test_zero_means_today(self):
+        drafts, _ = self.parse("0")
+        self.assertEqual(drafts[0]["date"], self.TODAY)
+
+    def test_null_means_no_date(self):
+        # **关键：没说日期和"今天"是两回事。**
+        # 草稿不带 date 键，前端才知道该用"你正在看的那天"兜底。
+        drafts, problems = self.parse("null")
+        self.assertIsNone(problems)
+        self.assertNotIn("date", drafts[0])
+
+    def test_missing_field_is_fine(self):
+        drafts, problems = parse_reply(
+            '{"tasks":[{"name":"写周报","minutes":60,"priority":"高"}]}', self.TODAY
+        )
+        self.assertIsNone(problems)
+        self.assertNotIn("date", drafts[0])
+
+    def test_bad_offset_keeps_the_task(self):
+        # 和 start 一个道理：日期没看懂，**不该把整条事务丢掉**
+        drafts, problems = self.parse('"明天"')
+        self.assertEqual([d["name"] for d in drafts], ["写周报"])
+        self.assertNotIn("date", drafts[0])
+        self.assertIn("日期", problems)
+
+    def test_absurd_offset_keeps_the_task(self):
+        drafts, problems = self.parse("9999")
+        self.assertEqual([d["name"] for d in drafts], ["写周报"])
+        self.assertNotIn("date", drafts[0])
+        self.assertIn("日期", problems)
+
+    def test_bad_offset_does_not_hide_other_tasks(self):
+        drafts, problems = parse_reply(
+            '{"tasks":['
+            '{"name":"开会","minutes":30,"priority":"高","day_offset":"下周三"},'
+            '{"name":"写周报","minutes":60,"priority":"低","day_offset":2}'
+            "]}",
+            self.TODAY,
+        )
+        self.assertEqual([d["name"] for d in drafts], ["开会", "写周报"])
+        self.assertEqual(drafts[1]["date"], "2026-11-03")
+        self.assertIn("日期", problems)
+
+    def test_ai_cannot_produce_a_wrong_date(self):
+        """**这是整个设计的意义所在。**
+
+        提示词里明令 AI 只输出天数差、不要输出日期。就算它不听话，
+        硬塞一个 "2026-11-05" 进来，那也只会被当成"差 2026-11-05 天"
+        而被拒掉——**AI 根本没有机会说出一个错的日期**，
+        它最多说出一个错的偏移，而偏移是个小到能一眼看出来的整数。
+        """
+        drafts, problems = self.parse('"2026-11-05"')
+        self.assertNotIn("date", drafts[0])
+        self.assertIn("日期", problems)
+
+
+class TestBuildPrompt(unittest.TestCase):
+    """提示词必须带上"今天几号、周几"——离开它「明天」就没有意义。"""
+
+    def test_today_is_filled_in(self):
+        text = build_prompt("2026-11-01")
+        self.assertIn("2026-11-01", text)
+        self.assertNotIn("__TODAY__", text)
+
+    def test_weekday_is_filled_in(self):
+        # 2026-11-01 是周日
+        text = build_prompt("2026-11-01")
+        self.assertIn("周日", text)
+        self.assertNotIn("__WEEKDAY__", text)
+
+    def test_json_example_survives(self):
+        # 提示词里那段 JSON 示例含大量花括号。用 .format() 的话这里会炸，
+        # 用 replace 就安然无恙——这就是当初不用 .format() 的原因。
+        text = build_prompt("2026-11-01")
+        self.assertIn('"day_offset":null', text)
+
+    def test_tells_ai_not_to_output_dates(self):
+        # 提示词里必须有这条禁令，否则 AI 会自作主张给具体日期
+        self.assertIn("不要输出具体日期", build_prompt("2026-11-01"))
+
+
 class TestDraftsAreValidated(unittest.TestCase):
     """AI 吐出来的东西必须能直接喂给 make_task。"""
 
@@ -196,6 +300,19 @@ class TestDraftsAreValidated(unittest.TestCase):
         )
         d = drafts[0]
         _, error = validate_task(d["name"], d["minutes"], d["priority"], d["start"])
+        self.assertIsNone(error)
+
+    def test_draft_with_date_passes_validate_task(self):
+        from plan import validate_task
+
+        drafts, _ = parse_reply(
+            '{"tasks":[{"name":"开会","minutes":30,"priority":"高","day_offset":1}]}',
+            "2026-11-01",
+        )
+        d = drafts[0]
+        _, error = validate_task(
+            d["name"], d["minutes"], d["priority"], None, d["date"]
+        )
         self.assertIsNone(error)
 
 

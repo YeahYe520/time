@@ -337,7 +337,11 @@ function renderDrafts() {
           <span class="tag ${PCLASS[t.priority] || "mid"}">${esc(t.priority)}</span>
           <span class="meta">${t.minutes}分${
             t.guessed ? " · AI 估的" : ""
-          }${t.start ? " · " + esc(t.start) + " 开始" : " · 自动安排"}</span>
+          }${t.start ? " · " + esc(t.start) + " 开始" : " · 自动安排"}${
+            // AI 说了日期就标出来。**这一步是给人看的最后一道关**：
+            // 它说"下周三"到底是哪天，你在这里一眼能确认，确认了才入库。
+            t.date_label ? ` · <b>${esc(t.date_label)}</b>` : ""
+          }</span>
           <button class="done-btn" data-drop="${i}">不要</button>
         </li>`).join("")}
     </ul>
@@ -355,7 +359,12 @@ async function confirmDrafts(btn) {
   // 逐条走 /api/tasks —— 也就是**再校验一遍**。
   // 草稿在 parse_reply 里已经验过一次，这里是第二道。
   // 两道都留着，因为"验证"这件事的成本远低于"脏数据进了库"。
+  //
+  // 落到哪天：**AI 说了就听 AI 的，没说才用你正在看的那天。**
+  // 你说"明天写周报"时正在看今天，那它就该去明天。
+  const landed = new Set();
   for (const t of drafts) {
+    const day = t.date || viewDay;
     const res = await fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -364,10 +373,12 @@ async function confirmDrafts(btn) {
         minutes: t.minutes,
         priority: t.priority,
         start: t.start || "",     // 空 = 没定时间，交给程序找空档
-        date: viewDay,            // 加到你正在看的那一天
+        date: day,
       }),
     });
-    if (!res.ok) {
+    if (res.ok) {
+      landed.add(day);
+    } else {
       const data = await res.json().catch(() => ({}));
       failures.push(`${t.name}：${data.error || "HTTP " + res.status}`);
     }
@@ -377,7 +388,11 @@ async function confirmDrafts(btn) {
   renderDrafts();
   $("ai-form").reset();
   $("ai-error").textContent = failures.length ? "部分没加上——" + failures.join("；") : "";
-  refresh();
+
+  // 都落到同一天、而且不是你现在看的这天 —— 就跟过去。
+  // 不然你说"明天写周报"，加完屏幕上什么都没变，会以为没加上。
+  const only = landed.size === 1 ? [...landed][0] : null;
+  refresh(only && only !== viewDay ? only : undefined);
 }
 
 $("ai-form").addEventListener("submit", async (e) => {

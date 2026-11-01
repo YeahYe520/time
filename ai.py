@@ -22,9 +22,11 @@ import json
 import requests
 
 from config import AI_API_KEY, AI_BASE_URL, AI_MODEL, ai_configured
-from plan import parse_hhmm, validate_task
+from plan import parse_day_offset, parse_hhmm, today_iso, validate_task, weekday_cn
 
 PROMPT = """你是日程录入助手。把用户说的一句话拆成若干条待办事务。
+
+**今天是 __TODAY__，__WEEKDAY__。**
 
 规则：
 - name：任务名，简短，不超过 20 字，尽量保留用户自己的说法
@@ -39,18 +41,41 @@ PROMPT = """你是日程录入助手。把用户说的一句话拆成若干条�
   **只有用户报了具体钟点才填**（"9点半"→"09:30"，"下午三点"→"15:00"）。
   只说了「上午」「下午」「晚上」这类模糊时段，或者压根没提时间，
   一律填 null——排程程序会自己找空档把它放进去，比瞎猜一个钟点准。
+- day_offset：这条事务是**距今几天**，一个整数。
+    今天 = 0，明天 = 1，后天 = 2，大后天 = 3，昨天 = -1。
+  用户说「下周三」「周五」这种星期几，**先照上面给的今天和星期几
+  算出差几天**，再填那个数。
+  **绝对不要输出具体日期**（不要写 "2026-11-05"），只输出天数差。
+  用户**完全没提日期**时填 null——注意这和"今天"不是一回事，
+  没说日期就填 null，让程序去决定。
 - guessed：如果 minutes 是你自己估的而不是用户明说的，填 true，否则 false
 
 只输出 JSON，不要解释、不要 markdown 代码块、不要多余文字。格式：
-{"tasks":[{"name":"写周报","minutes":60,"priority":"低","start":null,"guessed":false}]}
+{"tasks":[{"name":"写周报","minutes":60,"priority":"低","start":null,"day_offset":null,"guessed":false}]}
 
 如果用户的话里没有任何可执行的事务（比如只是在闲聊），返回 {"tasks":[]}。"""
 
 
-def parse_reply(text):
+def build_prompt(today):
+    """把今天的日期和星期几填进提示词。
+
+    **为什么用 replace 而不是 .format()？** 因为提示词里有一整段 JSON 示例，
+    里面全是花括号。用 .format() 的话每个花括号都得写成 {{{{，
+    以后每改一次提示词都要数一遍括号，迟早数错——而且错了是运行时才炸。
+    占位符替换没这个问题。
+
+    为什么要把"今天几号、周几"告诉 AI？因为「明天」「下周三」这类词
+    离开今天就没有意义。**把它算好的信息喂进去，它就不需要去猜今天是几号**——
+    这是它能算对「下周三差几天」的前提。
+    """
+    return PROMPT.replace("__TODAY__", today).replace("__WEEKDAY__", weekday_cn(today))
+
+
+def parse_reply(text, today=None):
     """把 AI 的原始回复解析成校验过的任务草稿。
 
     返回 (草稿列表, 问题说明)。纯函数——不联网、不读文件、不写文件。
+    today 显式传进来（不传才去读时钟）是为了**测得动**。
 
     这里要防四件事，每一件我都见过 AI 干：
     1. 把 JSON 包在 ```json 代码块里
@@ -61,9 +86,12 @@ def parse_reply(text):
     第 4 条由 plan.validate_task 兜底——**和命令行、网页用的是同一套规则**。
     所以 AI 编不出一个合法但违规的任务。
 
-    开始时间单独处理：**任务本身没问题、只有时间没看懂时，不整条丢掉**，
-    而是退回"自动安排"并说明。用户想要的是那条事务，不是一个格式完美的钟点。
+    **开始时间和日期都是单独处理的**：任务本身没问题、只是时间或日期没看懂时，
+    不整条丢掉，而是退回"自动安排"/"你正在看的那天"并说明一句。
+    用户想要的是那条事务，不是一个格式完美的钟点。
     """
+    if today is None:
+        today = today_iso()
     if not text or not text.strip():
         return None, "AI 返回了空内容"
 
@@ -111,18 +139,28 @@ def parse_reply(text):
         elif start is not None:
             fields["start"] = start
 
+        # 日期同理。AI 给的是"距今几天"，**换成具体日期这一步在这里做**——
+        # 也就是说 AI 自始至终没机会说出一个错的日期，它只能说出一个错的偏移。
+        day, day_error = parse_day_offset(raw.get("day_offset"), today)
+        if day_error:
+            problems.append(f"第 {i} 条的日期没看懂，加到你正在看的那天")
+        elif day is not None:
+            fields["date"] = day
+
         drafts.append({**fields, "guessed": bool(raw.get("guessed"))})
 
     return drafts, ("；".join(problems) if problems else None)
 
 
-def ask_ai(user_text, timeout=60):
+def ask_ai(user_text, timeout=60, today=None):
     """把用户的一句话发给 AI，拿回原始回复文本。返回 (文本, 错误信息)。
 
     这一层只负责网络。**所有判断都在 parse_reply 里**——那边测得动，
     所以这里越薄越好。网络会以各种方式失败，每一种都要给人话，
     而不是把异常栈丢到界面上。
     """
+    if today is None:
+        today = today_iso()
     if not ai_configured():
         return None, (
             "还没配置 AI。在项目根目录建一个 .env（照 .env.example 抄），"
@@ -143,7 +181,7 @@ def ask_ai(user_text, timeout=60):
                 "model": AI_MODEL,
                 "max_tokens": 1024,
                 "messages": [
-                    {"role": "user", "content": f"{PROMPT}\n\n用户说：{user_text}"}
+                    {"role": "user", "content": f"{build_prompt(today)}\n\n用户说：{user_text}"}
                 ],
             },
             timeout=timeout,
@@ -174,9 +212,11 @@ def ask_ai(user_text, timeout=60):
     return text, None
 
 
-def parse_request(user_text, timeout=60):
+def parse_request(user_text, timeout=60, today=None):
     """完整流程：发请求 → 解析回复。返回 (草稿列表, 错误信息)。"""
-    raw, error = ask_ai(user_text, timeout)
+    if today is None:
+        today = today_iso()
+    raw, error = ask_ai(user_text, timeout, today)
     if error:
         return None, error
-    return parse_reply(raw)
+    return parse_reply(raw, today)

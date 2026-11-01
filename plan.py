@@ -139,6 +139,10 @@ def shift_day(day, days):
     return (date.fromisoformat(day) + timedelta(days=days)).isoformat()
 
 
+# "距今几天"能接受的范围。见 parse_day_offset。
+MAX_PAST_DAYS = 30
+MAX_FUTURE_DAYS = 365
+
 _WEEKDAYS = "一二三四五六日"
 
 
@@ -163,6 +167,47 @@ def friendly_day(day, today=None):
         return "昨天"
     d = date.fromisoformat(day)
     return f"{d.month}月{d.day}日 {weekday_cn(day)}"
+
+
+def parse_day_offset(text, today):
+    """把"距今几天"解析成具体日期。返回 (日期, 错误信息)。
+
+    **AI 不直接说日期，只说差几天**（今天=0，明天=1，后天=2，昨天=-1）。
+
+    为什么不让它直接说 "2026-11-02"？因为那是算术，而算术不该交给 AI：
+
+    · 它可能把 2026 写成 2025——**这种错你一眼看不出来**，
+      而且要在几个月后翻到那天才发现
+    · 它可能说出 2026-02-30 这种根本不存在的日期
+    · 它可能记错今天是几号，整个偏移一位
+
+    改成"差几天"之后：输出是个小整数，**小到能一眼验证**；
+    加日期这一步由 `shift_day` 做，而它是纯算术，不可能加错。
+    AI 只需要把「下周三」这个词翻译成一个数——那是语义问题，
+    正是它擅长的。
+
+    留空 -> (None, None)：没说日期，由调用方决定（加到用户正在看的那天）。
+    """
+    if text is None:
+        return None, None
+    # bool 是 int 的子类，不拦的话 True 会变成"差 1 天"
+    if isinstance(text, bool):
+        return None, f"日期没看懂：「{text}」"
+    # int(3.7) 会**悄悄截成 3**——先拦掉，不然是个静默的错误
+    if isinstance(text, float) and not text.is_integer():
+        return None, f"日期没看懂：「{text}」"
+
+    try:
+        offset = int(text)
+    except (TypeError, ValueError):
+        return None, f"日期没看懂：「{text}」"
+
+    # 往前一个月够补记昨天前天的事，往后一年够排任何正常计划了。
+    # 再离谱就是 AI 算错了——宁可不要这个日期，也不能存一个荒唐的日子。
+    if not -MAX_PAST_DAYS <= offset <= MAX_FUTURE_DAYS:
+        return None, f"日期差得太离谱（{offset} 天），已忽略"
+
+    return shift_day(today, offset), None
 
 
 def parse_hhmm(text):
