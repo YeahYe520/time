@@ -17,12 +17,13 @@ from ai import parse_request
 from config import APP_PASSWORD
 from plan import (
     DAY_END,
-    DAY_START,
     blocked_reason,
+    effective_day_start,
     friendly_day,
     load_tasks,
     make_task,
     mark_done,
+    now_minutes,
     parse_date,
     save_tasks,
     schedule,
@@ -91,7 +92,10 @@ def api_plan():
         return jsonify({"error": error}), 400
     day = day or today
 
-    scheduled, blocked = schedule(tasks_on(load_tasks(), day, today))
+    # 看的是今天，自动排程的起点就抬到"现在"——不能把事务排到已经过去的时间点上。
+    # 看别的日子按配置的 DAY_START 来：翻到明天，该看到完整的一天。
+    start = effective_day_start(day, today, now_minutes())
+    scheduled, blocked = schedule(tasks_on(load_tasks(), day, today), day_start=start)
 
     def brief(t):
         return {
@@ -111,7 +115,10 @@ def api_plan():
         "today": today,
         "prev": shift_day(day, -1),
         "next": shift_day(day, 1),
-        "day_start": to_hhmm(DAY_START),
+        # 发的是**实际生效**的起点，不是配置里的 DAY_START。
+        # 今天下午三点打开网页，这里就是 "15:01"——如实告诉用户
+        # "从现在起才排得进去"，而不是显示一个做不到的 08:00。
+        "day_start": to_hhmm(start),
         "day_end": to_hhmm(DAY_END),
         # 已排的补上可显示的时间文本，别把内部的分钟数漏给前端。
         # auto=True 表示这个时间是我算出来的，不是你定的——前端据此画标记。

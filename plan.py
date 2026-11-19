@@ -29,7 +29,7 @@ DAY_START/DAY_END 只用来「自动找空档」和显示，**不限制事务能
 
 import json
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # Windows 控制台默认用 GBK 输出，中文在 Git Bash 里会变乱码
@@ -39,8 +39,16 @@ if hasattr(sys.stdout, "reconfigure"):
 TASKS_FILE = Path(__file__).parent / "tasks.json"
 
 # 自动找空档的范围。不影响定死时间的事务。
-DAY_START = 9 * 60    # 09:00
-DAY_END = 18 * 60     # 18:00
+#
+# 24:00 不是一天里真实存在的时刻（一天只有 00:00 到 23:59），这里是**区间的右端点**，
+# 意思是"到当天结束为止"。写成 End-of-Day 而不是 00:00，是因为 00:00 有歧义——
+# 它听起来像"当天开始"而不是"当天结束"。中文里 24:00 也确实这么用（"营业到24点"）。
+#
+# 代价：一整天的最后一个空档如果正好排满，事务的 end 会算出 1440，
+# to_hhmm 之后就变成字符串 "24:00"。这个字符串**不是合法的 HH:MM 时刻**，
+# 谁要把它解析回时间，都得自己处理这个特例（安卓那边就踩过）。
+DAY_START = 8 * 60     # 08:00
+DAY_END = 24 * 60      # 24:00（当天结束，= 1440 分钟）
 
 PRIORITY_ORDER = {"高": 0, "中": 1, "低": 2}
 
@@ -62,10 +70,53 @@ def to_hhmm(minutes):
 def today_iso():
     """今天是几号，形如 '2026-11-01'。
 
-    **这是整个项目唯一读系统时钟的地方。** 别处要用"今天"，
-    一律从参数传进去——不然那些函数就偷偷依赖时钟，测不动了。
+    **这是整个项目读系统时钟的两个地方之一**（另一个是 now_minutes）。
+    别处要用"今天"或"现在几点"，一律从参数传进去——
+    不然那些函数就偷偷依赖时钟，测不动了。
     """
     return date.today().isoformat()
+
+
+def now_minutes():
+    """现在是从零点起第几分钟，**向上取整**。
+
+    为什么向上取整：假设现在是 15:00:37。向下取整得到 900（15:00），
+    拿它当排程起点的话，排出来的事务开始时间就落在三十七秒之前了——
+    又是一个"排在过去"的时间点，正是这个规则要消灭的东西。
+    向上取整得到 901（15:01），保证排出来的时间一定 >= 现在。
+
+    极端情况：23:59:30 会得到 1440，也就是 DAY_END。
+    此时 [1440, 1440) 是个空区间，今天已经排不进任何东西了，
+    没定时间的事务会全部进待办栏。这是对的，不是 bug。
+    """
+    now = datetime.now()
+    # 秒和微秒只要有一个不为零，就得往前进一分钟
+    return now.hour * 60 + now.minute + (1 if (now.second or now.microsecond) else 0)
+
+
+def effective_day_start(day, today, now):
+    """某一天**实际**能用来自动排程的起点。
+
+    配置里 DAY_START 写的是 08:00，但"今天"得另说：
+    现在都下午三点了，还把一个没定时间的事务排到早上八点，是排给谁看的？
+
+        day == today  ->  max(DAY_START, 现在)
+        其它任何日子  ->  DAY_START
+
+    为什么别的日子不抬：**"现在几点"对昨天和明天都没有意义**。
+    你翻到明天，看到的应该是完整的一天；翻到昨天，看到的应该是当时的样子。
+
+    注意这个规则**只管自动排程**，不管你自己定死的时间。
+    你写 09:00 的事务就排 09:00，哪怕现在已经是下午——那是你的意思，
+    改掉它才是真的不听话。（config 里 DAY_START/DAY_END 的注释也是这个口径。）
+
+    **纯函数**：now 由调用方传进来，自己不读时钟，所以测得动。
+    这个项目一路在做的事就是把"读时钟"这种副作用挤到最外面那一层。
+    """
+    if day != today:
+        return DAY_START
+    # 夹一下：万一 now 大于 DAY_END，不能让区间反过来。
+    return max(DAY_START, min(now, DAY_END))
 
 
 def parse_date(text):
@@ -598,8 +649,11 @@ def cmd_plan(args):
     # 先按日期筛，再排程——**schedule 完全不知道"日期"这回事**，
     # 它只管把给它的那几条排进一天。日期是"给哪几条"的问题，
     # 排程是"怎么摆"的问题，两件事分开，各自都测得动。
-    scheduled, blocked = schedule(tasks_on(load_tasks(), day, today))
-    print(render(scheduled, blocked, day=day, today=today))
+    # 看的是今天，自动排程的起点就抬到"现在"——不能把事务排到已经过去的时间点上。
+    # 看别的日子按配置的 DAY_START 来：你翻到明天，该看到完整的一天。
+    start = effective_day_start(day, today, now_minutes())
+    scheduled, blocked = schedule(tasks_on(load_tasks(), day, today), day_start=start)
+    print(render(scheduled, blocked, day=day, today=today, day_start=start))
     return 0
 
 

@@ -21,6 +21,19 @@
   h1{margin:0;font-size:22px;font-weight:600;letter-spacing:.02em}
   .sub{color:var(--muted);font-size:13px;margin-top:3px}
 
+  /*
+    实时时钟。
+    font-variant-numeric:tabular-nums 是关键，不是装饰：
+    默认的比例字体里 "1" 比 "8" 窄，秒数一跳整行数字就往左右抖一下。
+    等宽数字让每一位宽度固定，秒针跳的时候只有数字变，位置不动。
+  */
+  .clock{
+    font-size:38px; font-weight:600; line-height:1.15; margin-top:10px;
+    font-variant-numeric:tabular-nums; font-feature-settings:"tnum";
+    color:var(--accent);
+  }
+  .clock .sec{font-size:22px; color:var(--muted); margin-left:2px}
+
   .card{
     background:var(--card); border:1px solid var(--line);
     border-radius:10px; padding:18px; margin-bottom:14px;
@@ -165,6 +178,13 @@
 
   <header>
     <h1>time</h1>
+    <!--
+      时钟分两个 span：时分用大号字、秒用小一号的灰字。
+      一眼扫过去先看到"现在几点几分"，秒是补充信息，不用抢主次。
+    -->
+    <div class="clock" id="clock">
+      <span id="clock-hm">--:--</span><span class="sec" id="clock-sec">:--</span>
+    </div>
     <div class="sub" id="sub">加载中…</div>
   </header>
 
@@ -252,6 +272,47 @@ function row(t, timeHtml, extra, why) {
 // 为什么？因为跨月、跨年、闰年、时区，这些地方自己算迟早会错；
 // 而 Python 那边已经有一套测过的 shift_day 了，直接用它的结果最省心。
 // null 表示"还没问过服务端"，第一次请求就不带参数，让服务端给今天。
+/* ---------- 实时时钟 ---------- */
+
+// 为什么不用 setInterval(tick, 1000)：
+// setInterval 只保证"至少隔 1000 毫秒调一次"，每次回调自己执行花掉的时间
+// 会累加进去。跑十几分钟，显示的秒数就会比真实时间慢一两秒，
+// 而且偶尔会跳秒、或者同一秒显示两遍。
+//
+// 正确做法是每一跳都**重新对齐到下一个整秒**：看当前这一秒已经过去多少毫秒，
+// 就只等剩下的那点。误差不会被累积，某一跳晚了下一跳自己会纠回来。
+let clockTimer = null;
+
+function tickClock() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+
+  $("clock-hm").textContent = pad(now.getHours()) + ":" + pad(now.getMinutes());
+  $("clock-sec").textContent = ":" + pad(now.getSeconds());
+
+  clockTimer = setTimeout(tickClock, 1000 - now.getMilliseconds());
+}
+
+function startClock() {
+  if (clockTimer !== null) return;   // 已经在跑了，别起第二个
+  tickClock();
+}
+
+function stopClock() {
+  clearTimeout(clockTimer);
+  clockTimer = null;
+}
+
+startClock();
+
+// 页面切到后台（锁屏、切到别的 App）时把秒针停掉。
+// 手机上这条很实在：屏幕都黑了，计时器还在后台每秒醒一次，纯属白耗电。
+// 切回来时再启动，tickClock 会立刻把时间刷成当前值，不会停在旧时间上。
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopClock();
+  else startClock();
+});
+
 let viewDay = null;
 
 async function refresh(day) {

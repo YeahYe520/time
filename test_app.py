@@ -222,6 +222,22 @@ class TestPlanApiByDate(PasswordGateTestCase):
         data = self.client.get("/api/plan?date=2026/11/03").get_json()
         self.assertEqual(data["day"], "2026-11-03")
 
+    def test_future_day_reports_the_configured_window(self):
+        # 明天不受"现在几点"影响——翻到明天，窗口就是配置的 08:00–24:00。
+        # 这条是确定性的（不像"今天"那条要看跑测试的时刻），所以敢断言具体值。
+        tomorrow = shift_day(today_iso(), 1)
+        data = self.client.get(f"/api/plan?date={tomorrow}").get_json()
+        self.assertEqual(data["day_start"], "08:00")
+        self.assertEqual(data["day_end"], "24:00")
+
+    def test_today_window_is_never_in_the_past(self):
+        # 今天这条只能查下限，不能断言具体值——
+        # 断言具体值的话，这个测试上午跑绿、下午跑红。
+        # "HH:MM" 字符串可以直接比大小，因为补了零。
+        data = self.client.get("/api/plan").get_json()
+        self.assertGreaterEqual(data["day_start"], "08:00")
+        self.assertLessEqual(data["day_start"], data["day_end"])
+
     def test_added_task_lands_on_the_requested_day(self):
         self.assertEqual(self.add("评审", date="2026-11-03").status_code, 201)
         self.assertEqual(self.store[0]["date"], "2026-11-03")

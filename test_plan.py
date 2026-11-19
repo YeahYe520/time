@@ -8,12 +8,16 @@ import unittest
 from datetime import date
 
 from plan import (
+    DAY_END,
+    DAY_START,
     blocked_reason,
     describe,
+    effective_day_start,
     find_gap,
     friendly_day,
     make_task,
     mark_done,
+    now_minutes,
     overlaps,
     parse_date,
     parse_day_offset,
@@ -418,11 +422,15 @@ class TestConflictArbitration(unittest.TestCase):
         self.assertEqual(blocked, [])
 
     def test_floating_task_fills_gap_around_fixed(self):
+        # 窗口**显式写死**，不吃 DAY_START/DAY_END 的默认值。
+        # 这个测试要验的是"空档填充"这段逻辑本身，不是当前配置的窗口是哪两个小时。
+        # 用默认值的话，以后一改窗口（比如改成 08:00–24:00），
+        # 没定时的那个会跑到窗口开头 08:00 去，这个测试就会莫名其妙地红。
         tasks = [
             task("定时的", 60, "高", id=1, start=540),
             task("没定时的", 60, "中", id=2),
         ]
-        scheduled, _ = schedule(tasks)
+        scheduled, _ = schedule(tasks, day_start=540, day_end=1080)
         by_name = {t["name"]: t for t in scheduled}
         self.assertEqual(by_name["没定时的"]["start"], 600)   # 紧跟在后面
 
@@ -524,6 +532,58 @@ class TestTodayIso(unittest.TestCase):
     def test_looks_like_iso_date(self):
         # 只检查形状，不检查具体是哪天——检查具体哪天，明天就跑失败了
         self.assertEqual(parse_date(today_iso())[1], None)
+
+
+class TestNowMinutes(unittest.TestCase):
+    def test_within_one_day(self):
+        # 同样只检查范围，不检查具体值——检查具体值，下一分钟就跑失败了
+        self.assertGreaterEqual(now_minutes(), 0)
+        self.assertLessEqual(now_minutes(), 24 * 60)
+
+
+class TestEffectiveDayStart(unittest.TestCase):
+    """今天要从"现在"开始排；别的日子按配置的 DAY_START 来。
+
+    这个函数是**纯的**——now 从参数传进来，所以可以随便喂时刻进去测，
+    不用真的等到下午三点才跑得动"现在三点该怎么办"这条。
+    这就是把读时钟挤到最外层换来的好处。
+    """
+
+    def test_today_is_lifted_to_now(self):
+        self.assertEqual(effective_day_start(TODAY, TODAY, 15 * 60), 15 * 60)
+
+    def test_today_earlier_than_window_keeps_config(self):
+        # 凌晨三点：配置里的 08:00 更晚，取更晚的那个
+        self.assertEqual(effective_day_start(TODAY, TODAY, 3 * 60), DAY_START)
+
+    def test_today_exactly_at_window_start(self):
+        self.assertEqual(effective_day_start(TODAY, TODAY, DAY_START), DAY_START)
+
+    def test_tomorrow_ignores_now(self):
+        # "现在几点"对明天没有意义：翻到明天，该看到完整的一天
+        self.assertEqual(effective_day_start(TOMORROW, TODAY, 15 * 60), DAY_START)
+
+    def test_yesterday_ignores_now(self):
+        self.assertEqual(effective_day_start(YESTERDAY, TODAY, 15 * 60), DAY_START)
+
+    def test_never_runs_past_day_end(self):
+        # 万一传进来一个超过 DAY_END 的值，夹住，别让区间反过来
+        self.assertEqual(effective_day_start(TODAY, TODAY, 99 * 60), DAY_END)
+
+    def test_floating_task_lands_after_now_not_at_window_start(self):
+        # 端到端：现在 15:00，一个没定时间的 60 分钟事务，
+        # 从前的行为是排到 08:00（已经过去了），现在应该排到 15:00
+        start = effective_day_start(TODAY, TODAY, 15 * 60)
+        scheduled, _ = schedule([task("写周报", 60)], day_start=start, day_end=DAY_END)
+        self.assertEqual(scheduled[0]["start"], 15 * 60)
+
+    def test_fixed_time_task_in_the_past_is_left_alone(self):
+        # 这个规则**只管自动排程**。你自己定死 09:00 的事务就留在 09:00，
+        # 哪怕现在是下午——那是你的意思，改掉它才是不听话。
+        start = effective_day_start(TODAY, TODAY, 15 * 60)
+        scheduled, _ = schedule(
+            [task("早上开会", 60, start=9 * 60)], day_start=start, day_end=DAY_END)
+        self.assertEqual(scheduled[0]["start"], 9 * 60)
 
 
 class TestTaskDay(unittest.TestCase):
