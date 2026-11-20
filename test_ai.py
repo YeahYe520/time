@@ -12,9 +12,16 @@
     v0.3：AI 的回复能被反复验证，不用真的调 AI
 """
 
+import base64
 import unittest
 
-from ai import build_prompt, parse_reply
+from ai import (
+    MAX_IMAGE_BYTES,
+    build_content,
+    build_prompt,
+    check_image,
+    parse_reply,
+)
 
 
 class TestParseReply(unittest.TestCase):
@@ -314,6 +321,102 @@ class TestDraftsAreValidated(unittest.TestCase):
             d["name"], d["minutes"], d["priority"], None, d["date"]
         )
         self.assertIsNone(error)
+
+
+class TestCheckImage(unittest.TestCase):
+    """用户传进来的图片必须先验过才能发给 AI。
+
+    这一组全是纯函数测试——check_image 不联网、不读文件，
+    就是为了能这样把各种坏输入喂进去验。
+    """
+
+    OK = base64.b64encode(b"x" * 100).decode()
+
+    def test_accepts_jpeg(self):
+        cleaned, error = check_image(self.OK, "image/jpeg")
+        self.assertIsNone(error)
+        self.assertEqual(cleaned, self.OK)
+
+    def test_accepts_png(self):
+        _, error = check_image(self.OK, "image/png")
+        self.assertIsNone(error)
+
+    def test_rejects_unknown_type(self):
+        # 白名单之外一律拒。用户传的这个字符串会被**原样**塞进发给 AI 的 JSON，
+        # 不校验等于让请求方决定我们要往上游发什么。
+        _, error = check_image(self.OK, "image/svg+xml")
+        self.assertIn("不支持", error)
+
+    def test_rejects_missing_type(self):
+        _, error = check_image(self.OK, None)
+        self.assertIn("不支持", error)
+
+    def test_rejects_broken_base64(self):
+        _, error = check_image("这不是 base64！！", "image/jpeg")
+        self.assertIn("base64", error)
+
+    def test_rejects_data_url_prefix(self):
+        # 前端很容易忘了切掉 "data:image/jpeg;base64," 这个前缀。
+        # 带着它发给 AI，AI 只会说看不懂——报错必须在这里，不能跑到下游去。
+        _, error = check_image("data:image/jpeg;base64," + self.OK, "image/jpeg")
+        self.assertIsNotNone(error)
+
+    def test_rejects_empty(self):
+        _, error = check_image("", "image/jpeg")
+        self.assertIn("空", error)
+
+    def test_rejects_too_large(self):
+        big = base64.b64encode(b"x" * (MAX_IMAGE_BYTES + 1)).decode()
+        _, error = check_image(big, "image/jpeg")
+        self.assertIn("太大", error)
+
+    def test_accepts_exactly_at_the_limit(self):
+        # 边界：正好等于上限要放行（判断用的是 > 不是 >=）
+        edge = base64.b64encode(b"x" * MAX_IMAGE_BYTES).decode()
+        _, error = check_image(edge, "image/jpeg")
+        self.assertIsNone(error)
+
+
+class TestBuildContent(unittest.TestCase):
+    """没图片时必须是**字符串**，有图片时才是内容块数组。
+
+    前者是为了不动已经跑通的东西：加图片功能不该改写纯文字那条路。
+    """
+
+    def test_without_image_is_a_plain_string(self):
+        c = build_content("2026-11-01", "明天开会", None)
+        self.assertIsInstance(c, str)
+        self.assertIn("明天开会", c)
+
+    def test_with_image_is_a_block_list(self):
+        c = build_content("2026-11-01", "", ("QUJD", "image/jpeg"))
+        self.assertIsInstance(c, list)
+        self.assertEqual(len(c), 2)
+        self.assertEqual(c[0]["type"], "text")
+        self.assertEqual(c[1]["type"], "image")
+
+    def test_image_block_shape(self):
+        # 这个形状是 Anthropic Messages API 规定的，写错了 API 直接报错
+        c = build_content("2026-11-01", "", ("QUJD", "image/png"))
+        src = c[1]["source"]
+        self.assertEqual(src["type"], "base64")
+        self.assertEqual(src["media_type"], "image/png")
+        self.assertEqual(src["data"], "QUJD")
+
+    def test_image_prompt_asks_for_everything(self):
+        # "一条都不要漏"是图片路径存在的理由——图里往往是一整屏安排
+        c = build_content("2026-11-01", "", ("QUJD", "image/jpeg"))
+        self.assertIn("一条都不要漏", c[0]["text"])
+
+    def test_extra_text_is_appended(self):
+        # 允许"图 + 一句话"：发张课表再补一句"只排下周的"
+        c = build_content("2026-11-01", "只排下周的", ("QUJD", "image/jpeg"))
+        self.assertIn("只排下周的", c[0]["text"])
+
+    def test_image_path_keeps_today_in_prompt(self):
+        # 图片路径也不能弄丢"今天几号"——「明天」离开它就没有意义
+        c = build_content("2026-11-01", "", ("QUJD", "image/jpeg"))
+        self.assertIn("2026-11-01", c[0]["text"])
 
 
 if __name__ == "__main__":

@@ -34,6 +34,16 @@
   }
   .clock .sec{font-size:22px; color:var(--muted); margin-left:2px}
 
+  /* 图片入口长得像个次要按钮。做成 label 而不是 button，
+     是因为它要触发的是一个隐藏的 file input，label 的 for 天然就能做到。 */
+  .filebtn{
+    display:inline-block; margin-top:10px; padding:8px 16px;
+    border:1px solid var(--line); border-radius:8px;
+    background:var(--bg); color:var(--muted);
+    font-size:13px; cursor:pointer; user-select:none;
+  }
+  .filebtn:active{background:var(--accent-soft); color:var(--accent)}
+
   .card{
     background:var(--card); border:1px solid var(--line);
     border-radius:10px; padding:18px; margin-bottom:14px;
@@ -43,14 +53,32 @@
     letter-spacing:.09em; margin:0 0 12px;
   }
 
+  /*
+    【为什么每一条 1fr 都写成 minmax(0,1fr)】
+
+    1fr 的全称是 minmax(auto, 1fr)，而那个 auto 的**最小值是 min-content**。
+    表单控件有天然的最小宽度——一个 <input> 不给 size 时，浏览器按"大约 20 个
+    字符宽"给它定尺寸。所以 `1fr 1fr` 的两列**压不到那个宽度以下**。
+
+    手机上卡片内宽只有 296px 左右，两列的最小值加起来就超了，于是整页横向
+    溢出：右边的输入框、按钮、甚至卡片的边框全跑到屏幕外面去。
+
+    minmax(0,1fr) 把最小值显式设成 0，列就真的能压。再配合下面控件的
+    min-width:0（网格项默认 min-width:auto，同样压不动），才彻底不溢出。
+
+    这是个很容易踩的坑：**它不报错，也不变形，只是悄悄把页面撑宽，
+    然后在手机上被裁掉一截。**
+  */
   form{display:grid;gap:8px}
-  #ai-form{grid-template-columns:1fr auto}
+  #ai-form{grid-template-columns:minmax(0,1fr) auto}
   /* 事件 | 开始时间 | 持续时间 | 优先级 | 按钮 */
-  #add-form{grid-template-columns:1fr 104px 78px 74px auto}
+  #add-form{grid-template-columns:minmax(0,1fr) 104px 78px 74px auto}
 
   input,select,button{
     font:inherit; padding:9px 11px; border:1px solid var(--line);
     border-radius:7px; background:#fff; color:var(--ink);
+    /* 网格项的 min-width 默认是 auto，同样会挡住收缩。见上面那段说明。 */
+    min-width:0;
   }
   input:focus,select:focus{
     outline:2px solid var(--accent); outline-offset:-1px; border-color:transparent;
@@ -137,9 +165,19 @@
     /* 坑一：iOS Safari 在聚焦 font-size 小于 16px 的输入框时，
        会把整个页面自动放大，而且放大后不会自己缩回去。
        把控件字号钉死在 16px 就不会触发。**跟布局无关，纯粹是字号。** */
-    input,select,button{font-size:16px}
+    /* 内边距可以收，字号不能动——每一行能矮 6px 左右，几行下来省出不少高度。 */
+    input,select,button{font-size:16px; padding:7px 9px}
 
-    #add-form{grid-template-columns:1fr 1fr}
+    /* 手动添加压成**两行**：
+         [ 要做什么                        ]
+         [ 15:00 ][ 60 ][ 中▾ ][ 添加 ]
+       原来排的是三行（时间|分钟 一行、优先级|按钮 一行），手机上白白多占一行。
+       四列能用 minmax(0,...) 挤下，靠的就是上面那条规则里的收缩能力。
+       第一列给 1.25fr：时间输入框自带一个时钟图标，比另外两个宽一点才不挤。 */
+    #add-form{
+      grid-template-columns:minmax(0,1.25fr) minmax(0,1fr) minmax(0,1fr) auto;
+      gap:6px;
+    }
     #add-form input[name="name"]{grid-column:1/-1}
 
     /* 坑二：一行放不下"时间 + 名字 + 优先级 + 时长 + 按钮"五样东西。
@@ -191,10 +229,19 @@
   <div class="card">
     <h2>说人话</h2>
     <form id="ai-form">
+      <!-- 去掉了 required：只发图不打字时，浏览器那句"请填写此字段"
+           不如服务端那句"说点什么，或者发张图"清楚 -->
       <input name="text" placeholder="比如：明天上午把周报写完，大概一小时，很急"
-             autocomplete="off" required>
+             autocomplete="off">
       <button type="submit">解析</button>
     </form>
+    <!--
+      图片入口。accept="image/*" 在手机上会同时给出"拍照"和"从相册选"两个选项。
+      真正的 input 藏起来，用 label 当按钮——原生的 file 控件各家长得都不一样，
+      没法跟这套样式统一。
+    -->
+    <label class="filebtn" for="ai-image">拍张照 / 选张图</label>
+    <input type="file" id="ai-image" accept="image/*" hidden>
     <div class="error" id="ai-error"></div>
     <div id="drafts"></div>
   </div>
@@ -456,21 +503,69 @@ async function confirmDrafts(btn) {
   refresh(only && only !== viewDay ? only : undefined);
 }
 
-$("ai-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const form = e.target;
-  const btn = form.querySelector("button");
+/* ---------- 图片 → 缩小 → base64 ---------- */
+
+// 把手机拍的照片缩小再传。
+//
+// 为什么不直接传原图：手机随手一拍就是 3~12MB，base64 之后还要再涨三分之一，
+// 一个请求体十几兆。而模型看 1600px 宽和看 4000px 宽，认字能力没有区别。
+//
+// 顺带解决了**照片方向**问题：手机照片常常靠 EXIF 里的一个字段标记
+// "该转 90 度"，像素本身是躺着的。现代浏览器显示 <img> 时会自动应用这个旋转，
+// 所以 drawImage 画到画布上拿到的已经是摆正的图——不用自己解析 EXIF。
+function loadImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("这张图打不开")); };
+    img.src = url;
+  });
+}
+
+const MAX_IMAGE_SIDE = 1600;
+
+async function shrinkToBase64(file) {
+  const img = await loadImageFile(file);
+  const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  // 先铺白底再画。PNG 的透明区域转成 JPEG 会变成**黑色**，
+  // 而截图里那些"透明"的地方你以为是白的——一张黑底黑字的图就什么都认不出来了。
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+
+  // toDataURL 返回的是 "data:image/jpeg;base64,XXXX"，
+  // 服务端只要逗号后面那一段（带前缀传过去 base64 解不开）
+  return canvas.toDataURL("image/jpeg", 0.85).split(",", 2)[1];
+}
+
+/* ---------- 解析（文字和图片共用） ---------- */
+
+async function runParse(body, imageFile) {
+  const btn = $("ai-form").querySelector("button");
+  const oldLabel = btn.textContent;
   btn.disabled = true;
-  btn.textContent = "解析中…";
+  btn.textContent = imageFile ? "看图…" : "解析中…";
   $("ai-error").textContent = "";
   drafts = [];
   renderDrafts();
 
   try {
+    if (imageFile) {
+      body.image = await shrinkToBase64(imageFile);
+      body.media_type = "image/jpeg";
+    }
     const res = await fetch("/api/parse", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: form.elements.namedItem("text").value }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
 
@@ -479,7 +574,9 @@ $("ai-form").addEventListener("submit", async (e) => {
       return;
     }
     if (!data.drafts.length) {
-      $("ai-error").textContent = "没听出什么可做的事务，换个说法试试";
+      $("ai-error").textContent = imageFile
+        ? "图里没看出什么可做的事务。试试拍清楚一点、或者只截日程那一块"
+        : "没听出什么可做的事务，换个说法试试";
       return;
     }
     drafts = data.drafts;
@@ -490,8 +587,21 @@ $("ai-form").addEventListener("submit", async (e) => {
     $("ai-error").textContent = "请求没发出去：" + err;
   } finally {
     btn.disabled = false;
-    btn.textContent = "解析";
+    btn.textContent = oldLabel;
   }
+}
+
+$("ai-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  runParse({ text: e.target.elements.namedItem("text").value });
+});
+
+$("ai-image").addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = "";   // 清掉，这样同一张图连选两次也能再次触发
+  if (!file) return;
+  // 输入框里有字的话一起带上——"发张课表 + 只排下周的"
+  runParse({ text: $("ai-form").elements.namedItem("text").value }, file);
 });
 
 $("drafts").addEventListener("click", (e) => {

@@ -35,6 +35,22 @@ from plan import (
 
 app = Flask(__name__, static_folder="static")
 
+# 请求体大小上限。图片走的是 JSON body，base64 之后比原图大三分之一——
+# 一张 4MB 的图传上来就是 5.3MB 的请求体。
+#
+# **这个上限不是可有可无的**：ai.check_image 那个 4MB 的检查是在
+# **请求收完、JSON 解析完**之后才跑的。不在这里拦一道的话，
+# 一个 1GB 的请求会在校验之前就先进内存。
+# 8MB 给正常请求留了足够余量（文字请求才几 KB）。
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
+
+
+@app.errorhandler(413)
+def too_large(_e):
+    """超过上限时返回 JSON 而不是 Flask 默认的 HTML 错误页——
+    前端是按 JSON 解析的，拿到 HTML 只会显示一句莫名其妙的报错。"""
+    return jsonify({"error": "请求体太大了，把图片压小一点再发"}), 413
+
 
 @app.before_request
 def require_password():
@@ -157,11 +173,20 @@ def api_parse():
         return jsonify({"error": "请求体必须是 UTF-8 编码的 JSON 对象"}), 400
 
     text = (data.get("text") or "").strip()
-    if not text:
-        return jsonify({"error": "说点什么吧"}), 400
+
+    # 图可以单独发，也可以配一句话一起发（比如发张课表再补"只排下周的"）。
+    # media_type 由前端给，但**不信任它**——真正的校验在 ai.check_image 里。
+    image_b64 = data.get("image")
+    image = (image_b64, data.get("media_type")) if image_b64 else None
+
+    if not text and image is None:
+        return jsonify({"error": "说点什么，或者发张图"}), 400
 
     today = today_iso()
-    drafts, problems = parse_request(text, today=today)
+    # 图片请求要慢——模型得先"看"图再想，比纯文字多不少时间。
+    # 超时给宽一点，不然大图会被自己的超时掐掉，而错误信息会误报成"AI 没响应"。
+    timeout = 120 if image else 60
+    drafts, problems = parse_request(text, timeout=timeout, today=today, image=image)
     # drafts is None = 整个解析失败（连不上 AI / 回复不是 JSON）。
     # drafts 是列表但 problems 非空 = 部分成功，**不能连好的那几条一起丢掉**。
     if drafts is None:
