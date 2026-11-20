@@ -170,10 +170,13 @@ AI 把「明天上午写周报，一小时，很急」翻译成
 
 AI 相关配置在 `.env`（**不进 git**）。照 `.env.example` 抄一份：
 
-    AI_BASE_URL=https://api.anthropic.com
+    AI_BASE_URL=https://api.anthropic.com   # 任何 Anthropic Messages 格式的端点
     AI_API_KEY=...
-    AI_MODEL=deepseek-v4.1-flash
+    AI_MODEL=...
     APP_PASSWORD=...        # 网页口令；留空 = 不启用
+
+`.env` 里**永远**只放占位符以外的真值，且永远不进仓库。这条是硬规矩：
+密钥进过一次 git 历史就再也删不干净了（改历史也改不掉"已经泄露"这件事）。
 
 没配 `.env` 时，`/api/parse` 会返回一句中文提示，而不是抛异常栈。
 **这个降级行为要一直保留**——没有 AI，命令行和手动添加必须照常可用。
